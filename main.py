@@ -4,11 +4,12 @@ import threading
 import cv2
 import subprocess as sp
 import time
+from numpy.core.fromnumeric import size
 from numpy.lib import add_docstring
 import pyaudio
 import wave
 from tqdm import tqdm
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 import os
 import ffmpeg
@@ -19,6 +20,8 @@ class Live(object):
         self.frame_queue = queue.Queue()
         self.video_queue = queue.Queue() # 待播放的视频列表
         self.playing_video = None # 正在播放的视频
+        self.playing_image = None # 显示的图片
+        self.playing_text = None # 显示文字
         self.command = ""
         # 自行设置
         self.rtmpUrl = rtmpUrl
@@ -29,30 +32,32 @@ class Live(object):
         #音频
         self.audio = Audio("test.wav")
         self.audio.add_radio("test1.wav")
+        self.connect()
 
-    def read_frame(self):
+    def connect(self):
         print("开启推流")
         if self.camera_path:
-            cap = cv2.VideoCapture(self.camera_path)
+            self.cap = cv2.VideoCapture(self.camera_path)
         else:
-            cap = cv2.VideoCapture(0)   
+            self.cap = cv2.VideoCapture(0)   
 
         # Get video information
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-        self.hight = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        self.rtmp_fps = int(self.cap.get(cv2.CAP_PROP_FPS))
+        self.rtmp_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.rtmp_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        self.hight = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        self.run_mmpeg()
 
-
+    def run_mmpeg(self):
         # ffmpeg command
         self.command = ['ffmpeg',
                 '-y',
                 '-f', 'rawvideo',
                 '-vcodec','rawvideo',
                 '-pix_fmt', 'bgr24',
-                '-s', "{}x{}".format(width, height),
-                '-r', str(fps),
+                '-s', "{}x{}".format(self.rtmp_width, self.rtmp_height),
+                '-r', str(self.rtmp_fps),
                 '-i', '-',
                 '-c:v', 'libx264',
                 '-c:a', 'aac',
@@ -60,63 +65,65 @@ class Live(object):
                 '-pix_fmt', 'yuv420p',
                 '-preset', 'ultrafast',
                 '-f', 'flv', 
-                '-listen', '1',
-                # self.rtmpUrl
+                # '-listen', '1',
+                self.rtmpUrl
                 # "cc.mp4"
-                "rtmp://127.0.0.1:3000/live/cc"
+                # "rtmp://127.0.0.1:3000/live/cc"
                 ]
 
-        # read webcamera
-        while(cap.isOpened()):
-            ret, frame = cap.read()
-            if not ret:
-                print("Opening camera is failed")
-                break
-
-            # put frame into queue
-            self.frame_queue.put(frame)
-
-
-            # 获取视频
-            # cv2.imshow('capture', frame)
-            # if cv2.waitKey(1) & 0XFF == ord("q"):
-            #     cap.release()
-            #     cv2.destroyAllWindows()
-            #     break
-            # else:
-            #     time.sleep(1)
-
-    def push_frame(self):
         # 防止多线程时 command 未被设置
         while True:
             if len(self.command) > 0:
                 # 管道配置
-                p = sp.Popen(self.command, stdin=sp.PIPE)
+                self.p = sp.Popen(self.command, stdin=sp.PIPE)
                 break
 
+    def read_frame(self):
+        # read webcamera
+        while(self.cap.isOpened()):
+            try:
+                ret, frame = self.cap.read()
+                if not ret:
+                    print("Opening camera is failed")
+                    break
+
+                # put frame into queue
+                self.frame_queue.put(frame)
+            except Exception as e:
+                print("error, will retry : ", str(e))
+                time.sleep(1)
+                self.connect()
+
+            # 显示图片
+            # cv2.imshow('capture', frame)
+
+    def push_frame(self):
         while True:
             if self.frame_queue.empty() != True:
                 frame = self.frame_queue.get()
-                # process frame
-                # 你处理图片的代码
-                # write to pipe
-                # print(frame)
+                # print("XXXXXXXXXX: ", frame.shape)
+                # cv2.imshow('capture', frame)
 
                 # 添加图片
-                frame = self.merge_image(frame, scale_rate=0.3, position=[500,100])
+                frame = self.merge_image(frame, scale_rate=0.3, position=[100,100])
+                frame = self.merge_text(frame, position=[10, 200])
 
-
-                # 合并视频贞
+                # # 合并视频贞
                 add_frame = self.get_video_frame()
-                # print(type(add_frame))
+                # # print(type(add_frame))
                 if type(add_frame) == np.ndarray:
+                    # cv2.imshow('capture', add_frame)
                     frame = self.merge_frame(frame, add_frame)
 
-                radio = self.audio.get_add_frame(self.audio.CHUNK)
-                if radio:
-                    p.stdin.write(radio)
-
-                p.stdin.write(frame.tostring())
+                # radio = self.audio.get_add_frame(self.audio.CHUNK)
+                # if radio:
+                #     p.stdin.write(radio)
+                try:
+                    self.p.stdin.write(frame.tostring())
+                except Exception as e:
+                    print("write rtmp faile, retry %s", str(e))
+                    time.sleep(1)
+                    self.run_mmpeg()
 
     def merge_frame(self, frame, addFrame, scale_rate=0.3, position=[0, 0]):
         img1 = Image.fromarray(frame)
@@ -126,16 +133,44 @@ class Live(object):
         return np.asarray(img1)
 
     def merge_image(self, frame, scale_rate=0.3, position=None):
-        o = Image.open("test.jpg")
+        if not self.playing_image:
+            return frame
+        o = Image.open(self.playing_image)
         o = o.resize((int(self.width * scale_rate), int(self.hight * scale_rate)))
         img1 = Image.fromarray(frame)
-        r,g,b = img1.split()
+        # r,g,b = img1.split()
         # img1 = Image.merge("RGB", (r, g, b))
         if isinstance(position, list) and len(position) == 2:
             img1.paste(o, position)
 
         out = np.asarray( img1)
         return out
+
+    def merge_text(self, frame, position=None):
+        if not self.playing_text:
+            return frame
+        img1 = Image.fromarray(frame)
+        image_editable = ImageDraw.Draw(img1)
+        if not isinstance(position, list) or len(position) == 2:
+            position = [10, 200]
+        image_editable.text(position, self.playing_text, (237, 230, 211), align='center', size=100)
+        out = np.asarray( img1)
+        return out
+
+    def add_text(self, text):
+        self.playing_text = text
+    
+    def remove_text(self):
+        self.playing_text = None
+
+    def add_image(self, name):
+        self.playing_image = name
+
+    def remove_image(self):
+        self.playing_image = None
+
+    def remove_video(self):
+        self.playing_video = None
         
     def add_video(self, video_path=None):
         # 打开视频，并存入播放视频的队列中
@@ -165,8 +200,12 @@ class Live(object):
         [thread.setDaemon(True) for thread in threads]
         [thread.start() for thread in threads]
 
+        # self.push_frame()
+
         #  添加视频
-        # self.add_video("test.mp4")
+        self.add_video("test.mp4")
+        self.add_image("test.jpg")
+        self.add_text("Hello Man!")
         for i in threads:
             i.join()
 
@@ -308,9 +347,10 @@ class ReadRTMP(object):
 
 
 if __name__ == "__main__":
-    url = None
-    live = Live(inputUrl=url, rtmpUrl="rtmp://localhost/live/cc")
+    url = "rtmp://139.155.2.91/live/s"
+    live = Live(inputUrl=url, rtmpUrl="rtmp://139.155.2.91/live/L17LTlsVqMNTZyLKMIFSD2x28MlgPJ0SDZVHnHJPxMKi0tWx")
     live.run()
+    # live.read_frame()
     # audio = Audio("test.wav")
     # audio.add_radio("test1.wav")
     # audio.get_audio_devices_info()
