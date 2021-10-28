@@ -1,4 +1,5 @@
 from genericpath import exists
+from posixpath import split
 import queue
 import threading
 import cv2
@@ -192,6 +193,40 @@ class Live(object):
             return self.get_video_frame()
         return None
 
+    def exec(self):
+        while True:
+            i = input("请输入指令：add|del jpg|video|text value\n ")
+            cs = i.split()
+            if len(cs) != 3:
+                print("错误的输入！")
+                continue
+            if cs[0] == "add":
+                if cs[1] == "jpg":
+                    self.add_image(cs[2])
+                    continue
+                elif cs[1] == "video":
+                    self.add_video(cs[2])
+                    continue
+                elif cs[2] == "text":
+                    self.add_text(cs[2])
+                    continue
+                else:
+                    print("错误的输入！")
+                    continue
+            elif cs[0] == "del":
+                if cs[1] == "jpg":
+                    self.remove_image(cs[2])
+                    continue
+                elif cs[1] == "video":
+                    self.remove_video(cs[2])
+                    continue
+                elif cs[2] == "text":
+                    self.remove_text(cs[2])
+                    continue
+            print("错误的输入！")
+            continue
+
+
     def run(self):
         threads = [
             threading.Thread(target=Live.read_frame, args=(self,)),
@@ -203,9 +238,10 @@ class Live(object):
         # self.push_frame()
 
         #  添加视频
-        self.add_video("test.mp4")
-        self.add_image("test.jpg")
-        self.add_text("Hello Man!")
+        # self.add_video("test.mp4")
+        # self.add_image("test.jpg")
+        # self.add_text("Hello Man!")
+        self.exec()
         for i in threads:
             i.join()
 
